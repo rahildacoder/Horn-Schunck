@@ -10,21 +10,67 @@
 #include <sstream>
 #include <algorithm>
 
-static float alpha = 1.0f;
-static int num_iterations = 100;
+// regularization parameter and number of iterations
+static float alpha = 5.0f;
+static int num_iterations = 20;
 
 // ==================== GPU KERNELS ====================
 
-// Kernel to compute image derivatives Ix, Iy, It
-__global__ void compute_derivatives(float* I1, float* I2, float* Ix, float* Iy, float* It, int width, int height) {
+// Kernel to compute sobel image derivatives Ix, Iy, It
+// Sobel derivatives in x and y directions, and temporal derivative
+// This type of derivative is better for optical flow than simple finite differences
+// since it smooths noise while computing gradients
+__global__ void compute_derivatives(const float* __restrict__ I1,
+                                    const float* __restrict__ I2,
+                                    float* __restrict__ Ix,
+                                    float* __restrict__ Iy,
+                                    float* __restrict__ It,
+                                    int width, int height) {
     int x = blockIdx.x * blockDim.x + threadIdx.x;
     int y = blockIdx.y * blockDim.y + threadIdx.y;
+
+    // need a 1-pixel border for 3x3 Sobel
     if (x < 1 || x >= width - 1 || y < 1 || y >= height - 1) return;
 
     int idx = y * width + x;
-    Ix[idx] = (I1[idx + 1] - I1[idx - 1] + I2[idx + 1] - I2[idx - 1]) * 0.25f;
-    Iy[idx] = (I1[idx + width] - I1[idx - width] + I2[idx + width] - I2[idx - width]) * 0.25f;
-    It[idx] = (I2[idx] - I1[idx]);
+    int idx_up = (y - 1) * width;
+    int idx_mid = y * width;
+    int idx_down = (y + 1) * width;
+
+    // Use only I1 for spatial derivatives
+    const float* I = I1;
+
+    // 3x3 neighborhood:
+    float I_ul = I[idx_up + (x - 1)];
+    float I_um = I[idx_up +  x    ];
+    float I_ur = I[idx_up + (x + 1)];
+
+    float I_ml = I[idx_mid + (x - 1)];
+    float I_mm = I[idx_mid + x];
+    float I_mr = I[idx_mid + (x + 1)];
+
+    float I_ll = I[idx_down + (x - 1)];
+    float I_lm = I[idx_down + x];
+    float I_lr = I[idx_down + (x + 1)];
+
+    // Sobel Gx (horizontal derivative)
+    // [-1  0  1
+    //  -2  0  2
+    //  -1  0  1]
+    float gx = (-I_ul + I_ur -2.0f * I_ml + 2.0f * I_mr -I_ll + I_lr);
+
+    // Sobel Gy (vertical derivative)
+    // [-1 -2 -1
+    //   0  0  0
+    //   1  2  1]
+    float gy = (-I_ul - 2.0f * I_um - I_ur + I_ll + 2.0f * I_lm + I_lr);
+
+    // scaling by 8 for Sobel normalization
+    Ix[idx] = gx * (1.0f / 8.0f);
+    Iy[idx] = gy * (1.0f / 8.0f);
+
+    // Temporal derivative
+    It[idx] = I2[idx] - I1[idx];
 }
 
 // Kernel to perform one iteration of Horn-Schunck update
@@ -35,8 +81,33 @@ __global__ void horn_schunck_iteration(float* U_old, float* V_old, float* U_new,
     if (x < 1 || x >= width - 1 || y < 1 || y >= height - 1) return;
 
     int idx = y * width + x;
-    float U_avg = (U_old[idx - 1] + U_old[idx + 1] + U_old[idx - width] + U_old[idx + width]) * 0.25f;
-    float V_avg = (V_old[idx - 1] + V_old[idx + 1] + V_old[idx - width] + V_old[idx + width]) * 0.25f;
+
+    // indices of neighboring pixels
+    int xm1 = x - 1;
+    int xp1 = x + 1;
+    int ym1 = y - 1;
+    int yp1 = y + 1;
+
+    // weighted 8-neighbor average
+    float U_avg =
+        (U_old[(ym1 * width) + xm1] * (1.0f/12.0f) +
+         U_old[(ym1 * width) + x] * (1.0f/6.0f) +
+         U_old[(ym1 * width) + xp1] * (1.0f/12.0f) +
+         U_old[(y * width) + xm1] * (1.0f/6.0f) +
+         U_old[(y * width) + xp1] * (1.0f/6.0f) +
+         U_old[(yp1 * width) + xm1] * (1.0f/12.0f) +
+         U_old[(yp1 * width) + x] * (1.0f/6.0f) +
+         U_old[(yp1 * width) + xp1] * (1.0f/12.0f));
+
+    float V_avg =
+        (V_old[(ym1 * width) + xm1] * (1.0f/12.0f) +
+         V_old[(ym1 * width) + x] * (1.0f/6.0f) +
+         V_old[(ym1 * width) + xp1] * (1.0f/12.0f) +
+         V_old[(y * width) + xm1] * (1.0f/6.0f) +
+         V_old[(y * width) + xp1] * (1.0f/6.0f) +
+         V_old[(yp1 * width) + xm1] * (1.0f/12.0f) +
+         V_old[(yp1 * width) + x] * (1.0f/6.0f) +
+         V_old[(yp1 * width) + xp1] * (1.0f/12.0f));
 
     float numerator = Ix[idx] * U_avg + Iy[idx] * V_avg + It[idx];
     float denominator = alpha2 + Ix[idx] * Ix[idx] + Iy[idx] * Iy[idx];
@@ -132,7 +203,6 @@ int main() {
     cv::cvtColor(frame1_bgr, I1_mat, cv::COLOR_BGR2GRAY);
     I1_mat.convertTo(I1_mat, CV_32F, 1.0 / 255.0);
 
-
     // Process each frame pair on GPU
     for (int i = 0; i < num_frames - 1; ++i) {
         cap >> frame2_bgr;
@@ -175,6 +245,10 @@ int main() {
             }
         }
 
+        // normalize magnitudes to [0,1]
+        cv::Mat mag_norm;
+        cv::normalize(mag, mag_norm, 0.0f, 1.0f, cv::NORM_MINMAX);
+
         cv::Mat hsv(height, width, CV_32FC3);
 
         for (int y = 0; y < height; ++y) {
@@ -182,7 +256,7 @@ int main() {
                 float angle = ang.at<float>(y,x) * 180.0f / M_PI;
                 if (angle < 0) angle += 360.0f;
 
-                float magnitude = std::min(1.0f, mag.at<float>(y,x) * 5.0f);
+                float magnitude = std::min(1.0f, mag_norm.at<float>(y,x) * 5.0f);
 
                 hsv.at<cv::Vec3f>(y,x) = cv::Vec3f(angle / 2.0f, 1.0f, magnitude);
             }
@@ -192,8 +266,13 @@ int main() {
         hsv.convertTo(hsv8, CV_8UC3, 255.0);
         cv::cvtColor(hsv8, bgr, cv::COLOR_HSV2BGR);
 
+        // blend with original frame for visualization
+        cv::Mat blended;
+        float alpha_blend = 0.3f;
+        cv::addWeighted(frame2_bgr, 1.0f - alpha_blend, bgr, alpha_blend, 0.0, blended);
+
         // write heatmap frame to output video
-        video_out.write(bgr);
+        video_out.write(blended);
 
         // move to next iteration
         I1_mat = I2_mat.clone();
