@@ -1,17 +1,17 @@
 #!/bin/bash
-#SBATCH --job-name=horn_schunck_shared
-#SBATCH --output=horn_schunck_%j.out
-#SBATCH --error=horn_schunck_%j.err
-#SBATCH --time=00:30:00
-#SBATCH --nodes=1
-#SBATCH --ntasks=1
-#SBATCH --partition=mi3001x
+#SBATCH -J horn_schunck_shared
+#SBATCH -o horn_schunck.log
+#SBATCH -t 00:10:00
+#SBATCH -N 1
+#SBATCH -n 4
+#SBATCH -p mi3001x
 
 # Load rocm
 module load rocm
 
 # Activate conda environment with OpenCV
 source $HOME/miniconda3/bin/activate horn
+conda activate horn
 
 # Compile with conda's OpenCV
 hipcc -O3 -o impl1_shared_memory impl1_shared_memory.cpp \

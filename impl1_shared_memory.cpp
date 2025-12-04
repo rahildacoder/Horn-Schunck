@@ -8,12 +8,12 @@
 #include <sys/types.h>
 #include <iomanip>
 #include <sstream>
+#include <algorithm>
 
 static float alpha = 1.0f;
 static int num_iterations = 100;
 
 // ==================== GPU KERNELS ====================
-
 
 // Kernel to compute image derivatives Ix, Iy, It
 __global__ void compute_derivatives(float* I1, float* I2, float* Ix, float* Iy, float* It, int width, int height) {
@@ -26,7 +26,6 @@ __global__ void compute_derivatives(float* I1, float* I2, float* Ix, float* Iy, 
     Iy[idx] = (I1[idx + width] - I1[idx - width] + I2[idx + width] - I2[idx - width]) * 0.25f;
     It[idx] = (I2[idx] - I1[idx]);
 }
-
 
 // Kernel to perform one iteration of Horn-Schunck update
 __global__ void horn_schunck_iteration(float* U_old, float* V_old, float* U_new, float* V_new,
@@ -47,44 +46,8 @@ __global__ void horn_schunck_iteration(float* U_old, float* V_old, float* U_new,
 
 // ==================== Other CPU functions (just copied from impl1.cpp) ====================
 
-// function to output grayscale bin files from input video and return number of files created
-int video_to_grayscale_bins(const char* input_video, const char* output_folder) {
-    mkdir(output_folder, 0777);
-
-    cv::VideoCapture cap(input_video);
-    if (!cap.isOpened()) {
-        printf("Error opening video file\n");
-        return 0;
-    }
-
-    int frame_count = 0;
-    cv::Mat frame, gray_frame;
-    while (cap.read(frame)) {
-        cv::cvtColor(frame, gray_frame, cv::COLOR_BGR2GRAY);
-        gray_frame.convertTo(gray_frame, CV_32F, 1.0 / 255.0);
-
-        char filename[256];
-        snprintf(filename, sizeof(filename), "%s/frame_%04d.bin", output_folder, frame_count);
-
-        FILE* file = fopen(filename, "wb");
-        if (!file) {
-            printf("Error opening %s for write\n", filename);
-            break;
-        }
-        fwrite(gray_frame.ptr<float>(), sizeof(float), gray_frame.rows * gray_frame.cols, file);
-        fclose(file);
-
-        frame_count++;
-    }
-    cap.release();
-
-    printf("Actually extracted %d frames.\n", frame_count);
-    return frame_count;
-}
-
-
-// constant function that takes in the input.mp4 video and outputs the number of frames, width, and height
-void get_video_properties(const char* filename,int& width, int& height) {
+// constant function that takes in the input.mp4 video and outputs the fps, width, and height
+void get_video_properties(const char* filename,int& width, int& height, float& fps) {
     cv::VideoCapture cap(filename);
     if (!cap.isOpened()) {
         printf("Error opening video file\n");
@@ -92,16 +55,8 @@ void get_video_properties(const char* filename,int& width, int& height) {
     }
     width = static_cast<int>(cap.get(cv::CAP_PROP_FRAME_WIDTH));
     height = static_cast<int>(cap.get(cv::CAP_PROP_FRAME_HEIGHT));
+    fps = static_cast<float>(cap.get(cv::CAP_PROP_FPS));
     cap.release();
-}
-
-// Helper function to load a frame from a binary file
-std::vector<float> load_frame(const char* filename, int width, int height) {
-    std::vector<float> frame(width * height);
-    FILE* file = fopen(filename, "rb");
-    fread(frame.data(), sizeof(float), width * height, file);
-    fclose(file);
-    return frame;
 }
 
 // Helper function to generate zero-padded filenames
@@ -115,15 +70,32 @@ std::string padded(int number) {
 
 int main() {
     int width, height;
+    float fps;
 
-    get_video_properties("input.mp4", width, height);
+    get_video_properties("input.mp4", width, height, fps);
 
-    int num_frames = video_to_grayscale_bins("input.mp4", "frames");
+    cv::VideoCapture cap("input.mp4");
+    if (!cap.isOpened()) {
+        printf("Error opening input.mp4\n");
+        return -1;
+    }
 
-    printf("Video properties - Frames: %d, Width: %d, Height: %d\n", num_frames, width, height);
+    int num_frames = (int)cap.get(cv::CAP_PROP_FRAME_COUNT);
 
-    // Create output folder
-    mkdir("flow", 0777);
+    printf("Video properties - Frames: %d, Width: %d, Height: %d, FPS: %.2f\n", num_frames, width, height, fps);
+
+    // create output video
+    cv::VideoWriter video_out(
+        "optical_flow_output.mp4",
+        cv::VideoWriter::fourcc('a','v','c','1'), // H.264 encoding
+        fps,
+        cv::Size(width, height)
+    );
+
+    if (!video_out.isOpened()) {
+        printf("ERROR: Could not open video writer!\n");
+        return -1;
+    }
 
     // GPU memory allocation
     int size = width * height * sizeof(float);
@@ -146,27 +118,35 @@ int main() {
     // Host arrays for result
     std::vector<float> U(width * height);
     std::vector<float> V(width * height);
-    std::vector<float> flow(width * height * 2);
 
-    // Load all frames
-    std::vector<std::vector<float>> frames(num_frames);
-    for (int i = 0; i < num_frames; ++i) {
-        std::string filename = "frames/frame_" + padded(i) + ".bin";
-        frames[i] = load_frame(filename.c_str(), width, height);
-    }
+    // Read all frames into a vector
+    cv::Mat frame1_bgr, frame2_bgr;
+    cv::Mat I1_mat, I2_mat;
+    cv::Mat mag(height, width, CV_32F);
+    cv::Mat ang(height, width, CV_32F);
+
+    // Read first frame
+    cap >> frame1_bgr;
+    if (frame1_bgr.empty()) return 0;
+
+    cv::cvtColor(frame1_bgr, I1_mat, cv::COLOR_BGR2GRAY);
+    I1_mat.convertTo(I1_mat, CV_32F, 1.0 / 255.0);
+
 
     // Process each frame pair on GPU
     for (int i = 0; i < num_frames - 1; ++i) {
-        auto& I1 = frames[i];
-        auto& I2 = frames[i+1];
+        cap >> frame2_bgr;
+        if (frame2_bgr.empty()) break;
+
+        cv::cvtColor(frame2_bgr, I2_mat, cv::COLOR_BGR2GRAY);
+        I2_mat.convertTo(I2_mat, CV_32F, 1.0 / 255.0);
 
         // Copy frames to GPU
-        hipMemcpy(d_I1, I1.data(), size, hipMemcpyHostToDevice);
-        hipMemcpy(d_I2, I2.data(), size, hipMemcpyHostToDevice);
+        hipMemcpy(d_I1, I1_mat.ptr<float>(), size, hipMemcpyHostToDevice);
+        hipMemcpy(d_I2, I2_mat.ptr<float>(), size, hipMemcpyHostToDevice);
 
         // Compute derivatives (once per frame pair)
-        hipLaunchKernelGGL(compute_derivatives, grid, block, 0, 0,
-                           d_I1, d_I2, d_Ix, d_Iy, d_It, width, height);
+        compute_derivatives<<<grid, block>>>(d_I1, d_I2, d_Ix, d_Iy, d_It, width, height);
 
         // Initialize flow to zero
         hipMemset(d_U_old, 0, size);
@@ -174,9 +154,8 @@ int main() {
 
         // Iterative refinement of flow estimates
         for (int iter = 0; iter < num_iterations; ++iter) {
-            hipLaunchKernelGGL(horn_schunck_iteration, grid, block, 0, 0,
-                               d_U_old, d_V_old, d_U_new, d_V_new,
-                               d_Ix, d_Iy, d_It, width, height, alpha2);
+            horn_schunck_iteration<<<grid, block>>>(d_U_old, d_V_old, d_U_new, d_V_new,
+                                                     d_Ix, d_Iy, d_It, width, height, alpha2);
             std::swap(d_U_old, d_U_new);
             std::swap(d_V_old, d_V_new);
         }
@@ -185,19 +164,42 @@ int main() {
         hipMemcpy(U.data(), d_U_old, size, hipMemcpyDeviceToHost);
         hipMemcpy(V.data(), d_V_old, size, hipMemcpyDeviceToHost);
 
-        // Combine U and V into a single output vector
-        for (int j = 0; j < width * height; ++j) {
-            flow[2 * j] = U[j];
-            flow[2 * j + 1] = V[j];
+        // build mag and ang matrices
+        for (int y = 0; y < height; ++y) {
+            for (int x = 0; x < width; ++x) {
+                int idx = y * width + x;
+                float u = U[idx];
+                float v = V[idx];
+                mag.at<float>(y,x) = sqrtf(u*u + v*v);
+                ang.at<float>(y,x) = atan2f(v, u);
+            }
         }
 
-        // Save flow to binary file within the "flow" folder
-        FILE* f = fopen(("flow/frame_" + padded(i) + ".bin").c_str(), "wb");
-        fwrite(flow.data(), sizeof(float), flow.size(), f);
-        fclose(f);
+        cv::Mat hsv(height, width, CV_32FC3);
+
+        for (int y = 0; y < height; ++y) {
+            for (int x = 0; x < width; ++x) {
+                float angle = ang.at<float>(y,x) * 180.0f / M_PI;
+                if (angle < 0) angle += 360.0f;
+
+                float magnitude = std::min(1.0f, mag.at<float>(y,x) * 5.0f);
+
+                hsv.at<cv::Vec3f>(y,x) = cv::Vec3f(angle / 2.0f, 1.0f, magnitude);
+            }
+        }
+
+        cv::Mat hsv8, bgr;
+        hsv.convertTo(hsv8, CV_8UC3, 255.0);
+        cv::cvtColor(hsv8, bgr, cv::COLOR_HSV2BGR);
+
+        // write heatmap frame to output video
+        video_out.write(bgr);
+
+        // move to next iteration
+        I1_mat = I2_mat.clone();
     }
 
-    // Cleanup
+    // cleanup
     hipFree(d_I1);
     hipFree(d_I2);
     hipFree(d_Ix);
