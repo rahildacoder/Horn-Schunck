@@ -9,6 +9,7 @@
 #include <iomanip>
 #include <sstream>
 #include <algorithm>
+#include <sys/time.h>
 
 // regularization parameter and number of iterations
 static float alpha = 5.0f;
@@ -26,93 +27,134 @@ __global__ void compute_derivatives(const float* __restrict__ I1,
                                     float* __restrict__ Iy,
                                     float* __restrict__ It,
                                     int width, int height) {
-    int x = blockIdx.x * blockDim.x + threadIdx.x;
-    int y = blockIdx.y * blockDim.y + threadIdx.y;
+    // Shared memory declaration
+    __shared__ float s_tile[18][18];  // 16x16 block + 1-pixel halo on each side
 
-    // need a 1-pixel border for 3x3 Sobel
-    if (x < 1 || x >= width - 1 || y < 1 || y >= height - 1) return;
+    int tx = threadIdx.x;
+    int ty = threadIdx.y;
+    int bx = blockIdx.x;
+    int by = blockIdx.y;
 
-    int idx = y * width + x;
-    int idx_up = (y - 1) * width;
-    int idx_mid = y * width;
-    int idx_down = (y + 1) * width;
+    // global coordinates subtracting 1 for halo
+    int x = bx * 16 + tx - 1;
+    int y = by * 16 + ty - 1;
 
-    // Use only I1 for spatial derivatives
-    const float* I = I1;
+    // Load data into shared memory
+    if (x >= 0 && x < width && y >= 0 && y < height) {
+        s_tile[ty][tx] = I1[y * width + x];
+    }
 
-    // 3x3 neighborhood:
-    float I_ul = I[idx_up + (x - 1)];
-    float I_um = I[idx_up +  x    ];
-    float I_ur = I[idx_up + (x + 1)];
+    __syncthreads();
 
-    float I_ml = I[idx_mid + (x - 1)];
-    float I_mm = I[idx_mid + x];
-    float I_mr = I[idx_mid + (x + 1)];
+    // only compute internal pixels
+    if (tx >= 1 && tx <= 16 && ty >= 1 && ty <= 16) {
+        // check if we have a 3x3 neighborhood
+        if (x > 0 && x < width - 1 && y > 0 && y < height - 1) {
+            // read from shared memory
+            float I_ul = s_tile[ty - 1][tx - 1];
+            float I_um = s_tile[ty - 1][tx];
+            float I_ur = s_tile[ty - 1][tx + 1];
+            float I_ml = s_tile[ty][tx - 1];
+            float I_mr = s_tile[ty][tx + 1];
+            float I_ll = s_tile[ty + 1][tx - 1];
+            float I_lm = s_tile[ty + 1][tx];
+            float I_lr = s_tile[ty + 1][tx + 1];
 
-    float I_ll = I[idx_down + (x - 1)];
-    float I_lm = I[idx_down + x];
-    float I_lr = I[idx_down + (x + 1)];
+            // Sobel Gx (horizontal derivative)
+            // [-1  0  1
+            //  -2  0  2
+            //  -1  0  1]
+            float gx = (-I_ul + I_ur - 2.0f * I_ml + 2.0f * I_mr - I_ll + I_lr) * 0.125f;
 
-    // Sobel Gx (horizontal derivative)
-    // [-1  0  1
-    //  -2  0  2
-    //  -1  0  1]
-    float gx = (-I_ul + I_ur -2.0f * I_ml + 2.0f * I_mr -I_ll + I_lr);
+            // Sobel Gy (vertical derivative)
+            // [-1 -2 -1
+            //   0  0  0
+            //   1  2  1]
+            float gy = (-I_ul - 2.0f * I_um - I_ur + I_ll + 2.0f * I_lm + I_lr) * 0.125f;
 
-    // Sobel Gy (vertical derivative)
-    // [-1 -2 -1
-    //   0  0  0
-    //   1  2  1]
-    float gy = (-I_ul - 2.0f * I_um - I_ur + I_ll + 2.0f * I_lm + I_lr);
-
-    // scaling by 8 for Sobel normalization
-    Ix[idx] = gx * (1.0f / 8.0f);
-    Iy[idx] = gy * (1.0f / 8.0f);
-
-    // Temporal derivative
-    It[idx] = I2[idx] - I1[idx];
+            int idx = y * width + x;
+            Ix[idx] = gx;
+            Iy[idx] = gy;
+            It[idx] = I2[idx] - I1[idx];
+        }
+    }
 }
 
-// Kernel to perform one iteration of Horn-Schunck update
-__global__ void horn_schunck_iteration(float* U_old, float* V_old, float* U_new, float* V_new,
-                                        float* Ix, float* Iy, float* It, int width, int height, float alpha2) {
-    int x = blockIdx.x * blockDim.x + threadIdx.x;
-    int y = blockIdx.y * blockDim.y + threadIdx.y;
-    if (x < 1 || x >= width - 1 || y < 1 || y >= height - 1) return;
+// Kernel to perform one iteration of Horn-Schunck update using shared memory
+__global__ void horn_schunck_iteration(float* U_old, float* V_old, 
+                                                   float* U_new, float* V_new,
+                                                   float* Ix, float* Iy, float* It, 
+                                                   int width, int height, float alpha2) {
+    // Shared memory for all inputs
+    __shared__ float s_U[18][18];
+    __shared__ float s_V[18][18];
+    __shared__ float s_Ix[18][18];
+    __shared__ float s_Iy[18][18];
+    __shared__ float s_It[18][18];
+    
+    int tx = threadIdx.x;
+    int ty = threadIdx.y;
+    int bx = blockIdx.x;
+    int by = blockIdx.y;
+    
+    // global coordinates subtracting 1 for halo
+    int x = bx * 16 + tx - 1;
+    int y = by * 16 + ty - 1;
+    
+    // Load all data into shared memory
+    if (x >= 0 && x < width && y >= 0 && y < height) {
+        int idx = y * width + x;
+        s_U[ty][tx] = U_old[idx];
+        s_V[ty][tx] = V_old[idx];
+        s_Ix[ty][tx] = Ix[idx];
+        s_Iy[ty][tx] = Iy[idx];
+        s_It[ty][tx] = It[idx];
+    }
+    
+    __syncthreads();
+    
+    // only compute internal pixels
+    if (tx >= 1 && tx <= 16 && ty >= 1 && ty <= 16) {
+        // check bounds
+        if (x >= 1 && x < width - 1 && y >= 1 && y < height - 1) {
+            // perform division only once
+            float twelveth = 1.0f / 12.0f;
+            float sixth = 1.0f / 6.0f;
 
-    int idx = y * width + x;
+            // read from shared memory
+            // weighted 8-neighbor average
+            float U_avg = 
+                (s_U[ty-1][tx-1] * twelveth +
+                 s_U[ty-1][tx] * sixth +
+                 s_U[ty-1][tx+1] * twelveth +
+                 s_U[ty][tx-1] * sixth +
+                 s_U[ty][tx+1] * sixth +
+                 s_U[ty+1][tx-1] * twelveth +
+                 s_U[ty+1][tx] * sixth +
+                 s_U[ty+1][tx+1] * twelveth);
 
-    // indices of neighboring pixels
-    int xm1 = x - 1;
-    int xp1 = x + 1;
-    int ym1 = y - 1;
-    int yp1 = y + 1;
+            float V_avg = 
+                (s_V[ty-1][tx-1] * twelveth +
+                 s_V[ty-1][tx] * sixth +
+                 s_V[ty-1][tx+1] * twelveth +
+                 s_V[ty][tx-1] * sixth +
+                 s_V[ty][tx+1] * sixth +
+                 s_V[ty+1][tx-1] * twelveth +
+                 s_V[ty+1][tx] * sixth +
+                 s_V[ty+1][tx+1] * twelveth);
 
-    // weighted 8-neighbor average
-    float U_avg =
-        (U_old[(ym1 * width) + xm1] * (1.0f/12.0f) +
-         U_old[(ym1 * width) + x] * (1.0f/6.0f) +
-         U_old[(ym1 * width) + xp1] * (1.0f/12.0f) +
-         U_old[(y * width) + xm1] * (1.0f/6.0f) +
-         U_old[(y * width) + xp1] * (1.0f/6.0f) +
-         U_old[(yp1 * width) + xm1] * (1.0f/12.0f) +
-         U_old[(yp1 * width) + x] * (1.0f/6.0f) +
-         U_old[(yp1 * width) + xp1] * (1.0f/12.0f));
+            float ix_val = s_Ix[ty][tx];
+            float iy_val = s_Iy[ty][tx];
+            float it_val = s_It[ty][tx];
+            
+            float numerator = ix_val * U_avg + iy_val * V_avg + it_val;
+            float denominator = alpha2 + ix_val * ix_val + iy_val * iy_val;
 
-    float V_avg =
-        (V_old[(ym1 * width) + xm1] * (1.0f/12.0f) +
-         V_old[(ym1 * width) + x] * (1.0f/6.0f) +
-         V_old[(ym1 * width) + xp1] * (1.0f/12.0f) +
-         V_old[(y * width) + xm1] * (1.0f/6.0f) +
-         V_old[(y * width) + xp1] * (1.0f/6.0f) +
-         V_old[(yp1 * width) + xm1] * (1.0f/12.0f) +
-         V_old[(yp1 * width) + x] * (1.0f/6.0f) +
-         V_old[(yp1 * width) + xp1] * (1.0f/12.0f));
-
-    float numerator = Ix[idx] * U_avg + Iy[idx] * V_avg + It[idx];
-    float denominator = alpha2 + Ix[idx] * Ix[idx] + Iy[idx] * Iy[idx];
-    U_new[idx] = U_avg - (Ix[idx] * numerator) / denominator;
-    V_new[idx] = V_avg - (Iy[idx] * numerator) / denominator;
+            int idx = y * width + x;
+            U_new[idx] = U_avg - (ix_val * numerator) / denominator;
+            V_new[idx] = V_avg - (iy_val * numerator) / denominator;
+        }
+    }
 }
 
 // ==================== Other CPU functions (just copied from impl1.cpp) ====================
@@ -151,7 +193,18 @@ int main() {
         return -1;
     }
 
-    int num_frames = (int)cap.get(cv::CAP_PROP_FRAME_COUNT);
+    // Count frames manually
+    int num_frames = 0;
+    cv::Mat test_frame;
+    while (true) {
+        cap >> test_frame;
+        if (test_frame.empty()) break;
+        num_frames++;
+    }
+    
+    // Reset video to beginning
+    cap.release();
+    cap.open("input.mp4");
 
     printf("Video properties - Frames: %d, Width: %d, Height: %d, FPS: %.2f\n", num_frames, width, height, fps);
 
@@ -182,7 +235,7 @@ int main() {
     hipMalloc(&d_V_old, size);
     hipMalloc(&d_V_new, size);
 
-    dim3 block(16, 16);
+    dim3 block(18, 18);
     dim3 grid((width + 15) / 16, (height + 15) / 16);
     float alpha2 = alpha * alpha;
 
@@ -203,6 +256,12 @@ int main() {
     cv::cvtColor(frame1_bgr, I1_mat, cv::COLOR_BGR2GRAY);
     I1_mat.convertTo(I1_mat, CV_32F, 1.0 / 255.0);
 
+    // timing values
+    timeval start, end;
+
+    // elapsed time vals
+    double totalTime = 0.0;
+
     // Process each frame pair on GPU
     for (int i = 0; i < num_frames - 1; ++i) {
         cap >> frame2_bgr;
@@ -222,6 +281,7 @@ int main() {
         hipMemset(d_U_old, 0, size);
         hipMemset(d_V_old, 0, size);
 
+        gettimeofday(&start, NULL);
         // Iterative refinement of flow estimates
         for (int iter = 0; iter < num_iterations; ++iter) {
             horn_schunck_iteration<<<grid, block>>>(d_U_old, d_V_old, d_U_new, d_V_new,
@@ -229,6 +289,8 @@ int main() {
             std::swap(d_U_old, d_U_new);
             std::swap(d_V_old, d_V_new);
         }
+        gettimeofday(&end, NULL);
+        totalTime += (end.tv_sec - start.tv_sec) + (end.tv_usec - start.tv_usec) * 1e-6;
 
         // Copy result back to CPU
         hipMemcpy(U.data(), d_U_old, size, hipMemcpyDeviceToHost);
@@ -277,6 +339,8 @@ int main() {
         // move to next iteration
         I1_mat = I2_mat.clone();
     }
+
+    printf("Total processing time for %d frames: %f seconds\n", num_frames, totalTime);
 
     // cleanup
     hipFree(d_I1);
