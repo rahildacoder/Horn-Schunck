@@ -1,7 +1,7 @@
 import numpy as np
 import cv2
 
-FLOW_FILE = "flow.bin"
+FLOW_FILE = "flow/frame_0000.bin"
 WIDTH = 1920
 HEIGHT = 1080
 STEP = 20

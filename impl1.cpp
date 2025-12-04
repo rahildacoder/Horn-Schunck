@@ -2,6 +2,59 @@
 #include <stdio.h>
 #include <sys/time.h>
 #include <vector>
+#include <opencv2/opencv.hpp>
+#include <sys/stat.h>
+#include <sys/types.h>
+
+static float alpha = 1.0f;
+
+// function to output grayscale bin files from input video and return number of files created
+int video_to_grayscale_bins(const char* input_video, const char* output_folder) {
+    mkdir(output_folder, 0777);
+
+    cv::VideoCapture cap(input_video);
+    if (!cap.isOpened()) {
+        printf("Error opening video file\n");
+        return 0;
+    }
+
+    int frame_count = 0;
+    cv::Mat frame, gray_frame;
+    while (cap.read(frame)) {
+        cv::cvtColor(frame, gray_frame, cv::COLOR_BGR2GRAY);
+        gray_frame.convertTo(gray_frame, CV_32F, 1.0 / 255.0);
+
+        char filename[256];
+        snprintf(filename, sizeof(filename), "%s/frame_%04d.bin", output_folder, frame_count);
+
+        FILE* file = fopen(filename, "wb");
+        if (!file) {
+            printf("Error opening %s for write\n", filename);
+            break;
+        }
+        fwrite(gray_frame.ptr<float>(), sizeof(float), gray_frame.rows * gray_frame.cols, file);
+        fclose(file);
+
+        frame_count++;
+    }
+    cap.release();
+
+    printf("Actually extracted %d frames.\n", frame_count);
+    return frame_count;
+}
+
+
+// constant function that takes in the input.mp4 video and outputs the number of frames, width, and height
+void get_video_properties(const char* filename,int& width, int& height) {
+    cv::VideoCapture cap(filename);
+    if (!cap.isOpened()) {
+        printf("Error opening video file\n");
+        return;
+    }
+    width = static_cast<int>(cap.get(cv::CAP_PROP_FRAME_WIDTH));
+    height = static_cast<int>(cap.get(cv::CAP_PROP_FRAME_HEIGHT));
+    cap.release();
+}
 
 std::vector<float> horn_schunck(const std::vector<float>& I1, const std::vector<float>& I2, int width, int height, float alpha) {
     std::vector<float> U(width * height, 0.0f);
@@ -23,10 +76,11 @@ std::vector<float> horn_schunck(const std::vector<float>& I1, const std::vector<
         }
     }
 
+    std::vector<float> U_avg(width * height, 0.0f);
+    std::vector<float> V_avg(width * height, 0.0f);
+
     // Iterative refinement of flow estimates
     for (int iter = 0; iter < num_iterations; ++iter) {
-        std::vector<float> U_avg(width * height, 0.0f);
-        std::vector<float> V_avg(width * height, 0.0f);
 
         // Compute average flow
         #pragma omp parallel for
@@ -62,6 +116,7 @@ std::vector<float> horn_schunck(const std::vector<float>& I1, const std::vector<
     return flow;
 }
 
+// Helper function to load a frame from a binary file
 std::vector<float> load_frame(const char* filename, int width, int height) {
     std::vector<float> frame(width * height);
     FILE* file = fopen(filename, "rb");
@@ -70,20 +125,40 @@ std::vector<float> load_frame(const char* filename, int width, int height) {
     return frame;
 }
 
+// Helper function to generate zero-padded filenames
+std::string padded(int number) {
+    std::ostringstream ss;
+    ss << std::setw(4) << std::setfill('0') << number;
+    return ss.str();
+}
+
+
 int main() {
-    const int width = 1920;
-    const int height = 1080;
+    int width, height;
+    
+    get_video_properties("input.mp4", width, height);
 
-    std::vector<float> I1 = load_frame("frames/frame_0053.bin", width, height);
-    std::vector<float> I2 = load_frame("frames/frame_0054.bin", width, height);
+    int num_frames = video_to_grayscale_bins("input.mp4", "frames");
 
-    float alpha = 1.0f;
+    printf("Video properties - Frames: %d, Width: %d, Height: %d\n", num_frames, width, height);
 
-    std::vector<float> flow = horn_schunck(I1, I2, width, height, alpha);
+    std::vector<std::vector<float>> frames(num_frames);
 
-    FILE* f = fopen("flow.bin", "wb");
-    fwrite(flow.data(), sizeof(float), flow.size(), f);
-    fclose(f);
+    for (int i = 0; i < num_frames; ++i) {
+        std::string filename = "frames/frame_" + padded(i) + ".bin";
+        frames[i] = load_frame(filename.c_str(), width, height);
+    }
+
+    for (int i = 0; i < num_frames - 1; ++i) {
+        auto& I1 = frames[i];
+        auto& I2 = frames[i+1];
+        auto flow = horn_schunck(I1, I2, width, height, alpha);
+
+        // Save flow to binary file within the "flow" folder
+        FILE* f = fopen(("flow/frame_" + padded(i) + ".bin").c_str(), "wb");
+        fwrite(flow.data(), sizeof(float), flow.size(), f);
+        fclose(f);
+    }
 
     return 0;
 }
