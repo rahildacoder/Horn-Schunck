@@ -59,7 +59,7 @@ def generate_video(input_file, output_file, width, height):
 
 def main():
     # Check if input.mp4 exists
-    if not os.path.exists("input.mp4"):
+    if not os.path.exists("input2.mp4"):
         print("Error: input.mp4 not found in current directory")
         sys.exit(1)
 
@@ -70,8 +70,8 @@ def main():
     # Generate videos at each resolution
     success_count = 0
     for name, width, height in resolutions:
-        output_file = f"input_{name}.mp4"
-        if generate_video("input.mp4", output_file, width, height):
+        output_file = f"input2_{name}.mp4"
+        if generate_video("input2.mp4", output_file, width, height):
             success_count += 1
         print()
 
@@ -82,7 +82,7 @@ def main():
     # List generated files
     print("\nGenerated files:")
     for name, _, _ in resolutions:
-        filename = f"input_{name}.mp4"
+        filename = f"input2_{name}.mp4"
         if os.path.exists(filename):
             size_mb = os.path.getsize(filename) / (1024 * 1024)
             print(f"  {filename:20s} ({size_mb:.2f} MB)")

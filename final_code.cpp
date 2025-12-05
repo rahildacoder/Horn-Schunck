@@ -170,14 +170,14 @@ int main(int argc, char** argv) {
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);
     MPI_Comm_size(MPI_COMM_WORLD, &world);
 
-    int width  = 0, height = 0;
+    int width = 0, height = 0;
     float fps = 0.0f;
 
-    get_video_properties("input2.mp4", width, height, fps);
+    get_video_properties("input_360p.mp4", width, height, fps);
 
     if (width == 0 || height == 0 || fps <= 0.0f) {
         if (rank == 0) {
-            printf("Error: could not read video properties from input2.mp4\n");
+            printf("Error: could not read video properties from input_360p.mp4\n");
         }
         MPI_Finalize();
         return -1;
@@ -186,9 +186,9 @@ int main(int argc, char** argv) {
     // Rank 0 counts total frames
     int num_frames = 0;
     if (rank == 0) {
-        cv::VideoCapture cap0("input2.mp4");
+        cv::VideoCapture cap0("input_360p.mp4");
         if (!cap0.isOpened()) {
-            printf("Rank 0: Error opening input2.mp4\n");
+            printf("Rank 0: Error opening input_360p.mp4\n");
             MPI_Abort(MPI_COMM_WORLD, -1);
         }
 
@@ -234,9 +234,9 @@ int main(int argc, char** argv) {
     }
 
     // Each rank opens the video independently
-    cv::VideoCapture cap("input2.mp4");
+    cv::VideoCapture cap("input_360p.mp4");
     if (!cap.isOpened()) {
-        printf("Rank %d: Error opening input2.mp4\n", rank);
+        printf("Rank %d: Error opening input_360p.mp4\n", rank);
         MPI_Abort(MPI_COMM_WORLD, -1);
     }
 
@@ -334,6 +334,7 @@ int main(int argc, char** argv) {
             std::swap(d_U_old, d_U_new);
             std::swap(d_V_old, d_V_new);
         }
+        hipDeviceSynchronize();
         gettimeofday(&end, NULL);
         localTime += (end.tv_sec - start.tv_sec) + (end.tv_usec - start.tv_usec) * 1e-6;
 
