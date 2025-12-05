@@ -1,0 +1,11 @@
+# Video files
+*.mp4
+
+# Compiled binaries
+impl_mpi_timed
+
+# Results directory
+results/
+
+# Log files
+*.log
