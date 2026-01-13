@@ -1,6 +1,6 @@
 To see results and a more detailed breakdown, check the pdf in the docs folder.
 
-Rahil Badkul and Qile Jiang
+Rahil Badkul and Qile Jiang implement the
 Horn-Schunck Method
 
 Introduction
