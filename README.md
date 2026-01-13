@@ -1,46 +1,45 @@
-1
+To see results and a more detailed breakdown, check the pdf in the docs folder.
+
 Rahil Badkul and Qile Jiang
 Horn-Schunck Method
 
 Introduction
+
 Goal: Estimate pixel motion between two consecutive frames in a video.
-Horn–Schunck method: Minimize the energy functional 
 
-where: 
-Ix, Iy, It : derivatives of image intensity I  along the x, y, and t. 
-α : a regularization constant.
-2
-
-Introduction
-The functional E can be minimized by solving the Euler–Lagrange equations: 
+The functional E from the Horn-Schunck equation can be minimized by solving the Euler–Lagrange equations: 
 where L is the integrand of E, and Δ is the Laplace operator. 
 Using finite difference approximation, we get an iterative scheme: 
-where              is a weighted avg. of u around the pixel at (x,y): 
-3
+where u(x,y) is a weighted avg. of u around the pixel at (x,y): 
 
 Implement H-S on GPU
+
+We created two GPU Kernels to parallelize and optimize the calculations required for each pair of frames.
+
 Input: Frame pair (I₁ I₂)
 Step 1: Compute Intensity Derivatives (GPU kernel)
 • Apply Sobel derivative operator → Ix, Iy
 • Temporal difference → It
 • Obtain values for each pair of frames
+
 Step 2: Iterative Solver (GPU kernel)
 • Initialize: U = 0, V = 0
 • Loop num_iter: Update U, V from neighbors, Swap (U_old ↔ U_new)
 Output: Flow field (U, V) 
-4
 
 Implement H-S on GPU
+
 One frame
 width = 1920 pixels
 height = 1080 pixels
+
 // Each block uses 18×18 threads to process a 
 // 16×16 pixel region + Halo around the region
+
 dim3 block(18, 18);    
 
 // Divide a frame into a grid of blocks 
 dim3 grid((width + 15) / 16, (height + 15) / 16);
-5
 
 H-S with Shared Memory
 __global__ void compute_derivatives(...){
@@ -58,14 +57,12 @@ __global__ void compute_derivatives(...){
   if (tx >= 1 && tx <= 16 && ty >= 1 && ty <= 16) {
     float I_ul   = s_tile[ty - 1][tx - 1];   // read from shared mem.
     float I_um = ...
-
     float gx = ... 	// compute horizontal sobel derivative
     float gy = ...        // compute vertical sobel derivative
 }
 H = Halo (load data only)
 W = Work threads  (load + compute internal pixels)
 Block: shares memory
-6
 
 H-S with Shared Memory
 __global__ void horn_schunck_iteration(...){
@@ -90,11 +87,11 @@ __global__ void horn_schunck_iteration(...){
 H = Halo (load data only)
 W = Work threads  (load + compute internal pixels)
 Block: shares memory
-7
+
+The above two kernels use shared memory. We also used distributed memory by splitting frames in a video across ranks.
 
 H-S with Distributed Memory
 
-8
 Frame are distributed across MPI ranks: 
 Rank 0: frames 0-16
 Rank 1: frames 16-32
@@ -117,22 +114,10 @@ MPI_Allreduce(&local_max_mag, &global_max_mag, 1, MPI_FLOAT, MPI_MAX, MPI_COMM_W
 MPI_Gatherv(local_U.data(), ..., U_all.data(), ...);
 
 
-
-
 Flow magnitudes need to be normalized, so the ranks:
 Share local max
 Receive global max
 
-9
-Original Video
-
-Flow Field Result (blended)
-10
-
-Flow Field Result (overlay only)
-11
-
-12
 Roofline Analysis on HS 
 44 FLOPS / pixel: 
 8-point average for U: 8 mults + 7 adds = 15 FLOPs. Same for V: 15 FLOPs.
@@ -143,22 +128,15 @@ Block loads:     5 arrays × 18×18 tiles = 6,480 bytes.
 Block writes:    2 arrays × 16×16 tiles = 2,048 bytes.  Total: 8,528 bytes per block
 Per pixel:          8,528 bytes ÷ 256 pixels = 33.3 bytes/pixel
 
-13
-Roofline Analysis on HS 
-The H-S kernel is memory-bound. 
+Roofline Analysis on HS tells us that the H-S kernel is memory-bound. 
 
+Limitations:
 
+Load balancing:
 
-AMD MI300X - Peak FP32 Performance: 163.4 TFLOP/s  - Peak Memory Bandwidth: 5.3 TB/s 
-
-14
-Limitations
-Load balancing
 When we dealt with longer or higher resolution videos, we ran into data overflow issues
 If we streamed our frames in batches and only sent new work to a rank after it finished its current batch, we could keep memory usage bounded and improve load balancing for very long / 4K videos.
-Video writing
+
+Video writing:
 To increase parallelization and decrease processing time further, we could offload the video writing step to the GPU.
 Using a GPU-accelerated encoder would let us write frames faster and avoid the bottleneck of finishing the main computation.
-
-Thank you
-15
