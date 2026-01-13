@@ -1,4 +1,4 @@
-To see results and a more detailed breakdown, check the pdf in the docs folder.
+TO SEE A MORE DETAILED BREAKDOWN OF METHODOLOGY AND RESULTS, CHECK THE FILE: "APMA 2822B PRESENTATION"
 
 Rahil Badkul and Qile Jiang implement the
 Horn-Schunck Method
