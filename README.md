@@ -118,16 +118,6 @@ Flow magnitudes need to be normalized, so the ranks:
 Share local max
 Receive global max
 
-Roofline Analysis on HS 
-44 FLOPS / pixel: 
-8-point average for U: 8 mults + 7 adds = 15 FLOPs. Same for V: 15 FLOPs.
-Numerator: 2 mults + 2 adds = 4 FLOPs.  Denominator: 2 + 2 = 4 FLOPs.
-Update U and V: 2 × (1 mult + 1 div + 1 sub) = 6 FLOPs.  
-33.3 bytes / pixel:
-Block loads:     5 arrays × 18×18 tiles = 6,480 bytes.
-Block writes:    2 arrays × 16×16 tiles = 2,048 bytes.  Total: 8,528 bytes per block
-Per pixel:          8,528 bytes ÷ 256 pixels = 33.3 bytes/pixel
-
 Roofline Analysis on HS tells us that the H-S kernel is memory-bound. 
 
 Limitations:
